@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { existsSync, mkdirSync, unlinkSync, statSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, unlinkSync, statSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { supabaseAdmin } from '../config/supabase.js';
 import { mediasoupService } from './mediasoup.service.js';
@@ -11,7 +11,7 @@ import { logger } from '../utils/logger.js';
 const recordingProcesses = new Map();
 
 const waitForFfmpegStartup = (ffmpegProcess) => new Promise((resolve, reject) => {
-  const startupTimer = setTimeout(resolve, 500);
+  const startupTimer = setTimeout(resolve, 2000);
 
   ffmpegProcess.once('error', (err) => {
     clearTimeout(startupTimer);
@@ -34,7 +34,7 @@ const waitForFfmpegExit = (ffmpegProcess) => new Promise((resolve) => {
     return;
   }
 
-  const exitTimer = setTimeout(resolve, 3000);
+  const exitTimer = setTimeout(resolve, 5000);
   ffmpegProcess.once('exit', () => {
     clearTimeout(exitTimer);
     resolve();
@@ -49,9 +49,42 @@ const ensureTempDir = () => {
   return dir;
 };
 
+/**
+ * Generate an SDP file for ffmpeg to understand the incoming RTP streams.
+ * Without this, ffmpeg can't decode raw RTP over UDP (it doesn't know the codec).
+ */
+const generateSdp = ({ audioPort, audioPayloadType, audioClockRate, videoPort, videoPayloadType, videoClockRate, ip }) => {
+  const lines = [
+    'v=0',
+    'o=- 0 0 IN IP4 127.0.0.1',
+    's=mediasoup recording',
+    `c=IN IP4 ${ip}`,
+    't=0 0',
+  ];
+
+  if (audioPort && audioPayloadType !== undefined) {
+    lines.push(
+      `m=audio ${audioPort} RTP/AVP ${audioPayloadType}`,
+      `a=rtpmap:${audioPayloadType} opus/${audioClockRate}/2`,
+      'a=recvonly',
+    );
+  }
+
+  if (videoPort && videoPayloadType !== undefined) {
+    lines.push(
+      `m=video ${videoPort} RTP/AVP ${videoPayloadType}`,
+      `a=rtpmap:${videoPayloadType} VP8/${videoClockRate}`,
+      'a=recvonly',
+    );
+  }
+
+  return lines.join('\r\n') + '\r\n';
+};
+
 const startRecording = async (sessionId) => {
   const tempDir = ensureTempDir();
-  const tempFilePath = join(tempDir, `${sessionId}.mp4`);
+  const tempFilePath = join(tempDir, `${sessionId}.webm`);
+  const sdpFilePath = join(tempDir, `${sessionId}.sdp`);
 
   const { data: existingRecording } = await supabaseAdmin
     .from('recordings')
@@ -94,26 +127,105 @@ const startRecording = async (sessionId) => {
   }
 
   let ffmpegProcess = null;
-  let plainTransportInfo = null;
-  let plainTransportConsumers = [];
+  let audioPlainTransport = null;
+  let videoPlainTransport = null;
+  let allConsumers = [];
 
   try {
-    plainTransportInfo = await mediasoupService.createPlainTransport(sessionId);
+    // Create separate plain transports for audio and video so they get distinct ports
+    audioPlainTransport = await mediasoupService.createPlainTransport(sessionId);
+    videoPlainTransport = await mediasoupService.createPlainTransport(sessionId);
 
+    // Pipe existing producers to the plain transports
+    const room = mediasoupService.rooms.get(sessionId);
+    if (!room) {
+      throw new AppError('ROOM_NOT_FOUND', 'Session room not found for recording.', 404);
+    }
+
+    let audioConsumer = null;
+    let videoConsumer = null;
+
+    // Find audio and video producers and consume them on the respective plain transports
+    for (const [, peer] of room.peers) {
+      for (const [, producer] of peer.producers) {
+        try {
+          if (producer.kind === 'audio' && !audioConsumer) {
+            const audioTransport = mediasoupService.getPlainTransport(sessionId, audioPlainTransport.id);
+            if (audioTransport && room.router.canConsume({ producerId: producer.id, rtpCapabilities: room.router.rtpCapabilities })) {
+              audioConsumer = await audioTransport.consume({
+                producerId: producer.id,
+                rtpCapabilities: room.router.rtpCapabilities,
+                paused: false
+              });
+              allConsumers.push(audioConsumer);
+            }
+          } else if (producer.kind === 'video' && !videoConsumer) {
+            const videoTransport = mediasoupService.getPlainTransport(sessionId, videoPlainTransport.id);
+            if (videoTransport && room.router.canConsume({ producerId: producer.id, rtpCapabilities: room.router.rtpCapabilities })) {
+              videoConsumer = await videoTransport.consume({
+                producerId: producer.id,
+                rtpCapabilities: room.router.rtpCapabilities,
+                paused: false
+              });
+              allConsumers.push(videoConsumer);
+            }
+          }
+        } catch (err) {
+          logger.error({ event: 'recording_consume_failed', producerId: producer.id, error: err.message });
+        }
+      }
+    }
+
+    if (!audioConsumer && !videoConsumer) {
+      throw new AppError('NO_PRODUCERS', 'No audio or video producers found to record.', 409);
+    }
+
+    // Generate SDP file for ffmpeg
+    const sdpContent = generateSdp({
+      audioPort: audioConsumer ? audioPlainTransport.port : null,
+      audioPayloadType: audioConsumer ? audioConsumer.rtpParameters.codecs[0].payloadType : undefined,
+      audioClockRate: audioConsumer ? audioConsumer.rtpParameters.codecs[0].clockRate : undefined,
+      videoPort: videoConsumer ? videoPlainTransport.port : null,
+      videoPayloadType: videoConsumer ? videoConsumer.rtpParameters.codecs[0].payloadType : undefined,
+      videoClockRate: videoConsumer ? videoConsumer.rtpParameters.codecs[0].clockRate : undefined,
+      ip: '127.0.0.1'
+    });
+
+    writeFileSync(sdpFilePath, sdpContent);
+    logger.info({ event: 'sdp_generated', sessionId, sdpContent });
+
+    // Build ffmpeg arguments with proper SDP input
     const ffmpegArgs = [
+      '-loglevel', 'warning',
       '-protocol_whitelist', 'file,udp,rtp',
-      '-i', `udp://${plainTransportInfo.ip}:${plainTransportInfo.port}`,
-      '-c:v', 'copy',
-      '-c:a', 'aac',
-      '-f', 'mp4',
+      '-fflags', '+genpts',
+      '-i', sdpFilePath,
+    ];
+
+    // Add codec handling
+    if (videoConsumer) {
+      ffmpegArgs.push('-c:v', 'libvpx');
+    }
+    if (audioConsumer) {
+      ffmpegArgs.push('-c:a', 'libopus');
+    }
+
+    ffmpegArgs.push(
+      '-f', 'webm',
       '-y',
       tempFilePath
-    ];
+    );
 
     ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
-    ffmpegProcess.stderr.on('data', (data) => {
-      logger.info({ event: 'ffmpeg_stderr', data: data.toString() });
+    let stderrOutput = '';
+    ffmpegProcess.stderr.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderrOutput += text;
+      // Only log important ffmpeg messages
+      if (text.includes('Error') || text.includes('error') || text.includes('Invalid')) {
+        logger.error({ event: 'ffmpeg_stderr', sessionId, data: text });
+      }
     });
 
     ffmpegProcess.on('error', (err) => {
@@ -122,10 +234,12 @@ const startRecording = async (sessionId) => {
 
     ffmpegProcess.on('exit', (code) => {
       logger.info({ event: 'ffmpeg_exit', sessionId, code });
+      if (code !== 0 && stderrOutput) {
+        logger.error({ event: 'ffmpeg_stderr_on_exit', sessionId, stderr: stderrOutput.slice(-500) });
+      }
     });
 
     await waitForFfmpegStartup(ffmpegProcess);
-    plainTransportConsumers = await mediasoupService.pipeProducersToPlainTransport(sessionId, plainTransportInfo.id);
 
   } catch (ffmpegError) {
     metrics.recordingErrors.inc();
@@ -135,10 +249,25 @@ const startRecording = async (sessionId) => {
       ffmpegProcess.kill('SIGTERM');
     }
 
-    const plainTransport = plainTransportInfo?.id
-      ? mediasoupService.getPlainTransport(sessionId, plainTransportInfo.id)
-      : null;
-    plainTransport?.close();
+    // Close consumers
+    for (const consumer of allConsumers) {
+      try { consumer.close(); } catch { /* ignore */ }
+    }
+
+    // Close plain transports
+    const closeTransport = (info) => {
+      if (info?.id) {
+        const t = mediasoupService.getPlainTransport(sessionId, info.id);
+        t?.close();
+      }
+    };
+    closeTransport(audioPlainTransport);
+    closeTransport(videoPlainTransport);
+
+    // Clean up SDP file
+    if (existsSync(sdpFilePath)) {
+      try { unlinkSync(sdpFilePath); } catch { /* ignore */ }
+    }
 
     await supabaseAdmin
       .from('recordings')
@@ -156,11 +285,12 @@ const startRecording = async (sessionId) => {
     recordingId: data.id,
     sessionId,
     tempFilePath,
+    sdpFilePath,
     startedAt: new Date(),
     ffmpegProcess,
-    plainTransportConsumers,
-    plainTransportId: plainTransportInfo?.id,
-    plainTransportPort: plainTransportInfo?.port
+    consumers: allConsumers,
+    audioPlainTransportId: audioPlainTransport?.id,
+    videoPlainTransportId: videoPlainTransport?.id,
   };
 
   recordingProcesses.set(sessionId, processInfo);
@@ -169,13 +299,12 @@ const startRecording = async (sessionId) => {
     event: 'recording_started',
     sessionId,
     recordingId: data.id,
-    tempFilePath
+    tempFilePath,
+    hasAudio: allConsumers.some(c => c.kind === 'audio'),
+    hasVideo: allConsumers.some(c => c.kind === 'video'),
   });
 
-  return {
-    ...data,
-    plainTransport: plainTransportInfo
-  };
+  return data;
 };
 
 const stopRecording = async (sessionId) => {
@@ -184,21 +313,38 @@ const stopRecording = async (sessionId) => {
     throw new AppError('RECORDING_NOT_ACTIVE', 'No active recording was found for this session.', 409);
   }
 
-  const { ffmpegProcess, tempFilePath, recordingId } = processInfo;
+  const { ffmpegProcess, tempFilePath, sdpFilePath, recordingId } = processInfo;
 
-  if (ffmpegProcess) {
-    ffmpegProcess.kill('SIGTERM');
+  // Signal ffmpeg to finish writing
+  if (ffmpegProcess && ffmpegProcess.exitCode === null) {
+    ffmpegProcess.stdin?.write('q');
+    // Give it a moment, then force kill if needed
+    await new Promise(r => setTimeout(r, 1000));
+    if (ffmpegProcess.exitCode === null) {
+      ffmpegProcess.kill('SIGTERM');
+    }
     await waitForFfmpegExit(ffmpegProcess);
   }
 
-  for (const consumer of processInfo.plainTransportConsumers || []) {
-    consumer.close();
+  // Close consumers
+  for (const consumer of processInfo.consumers || []) {
+    try { consumer.close(); } catch { /* ignore */ }
   }
 
-  const plainTransport = processInfo.plainTransportId
-    ? mediasoupService.getPlainTransport(sessionId, processInfo.plainTransportId)
-    : null;
-  plainTransport?.close();
+  // Close plain transports
+  const closeTransport = (id) => {
+    if (id) {
+      const t = mediasoupService.getPlainTransport(sessionId, id);
+      t?.close();
+    }
+  };
+  closeTransport(processInfo.audioPlainTransportId);
+  closeTransport(processInfo.videoPlainTransportId);
+
+  // Clean up SDP file
+  if (sdpFilePath && existsSync(sdpFilePath)) {
+    try { unlinkSync(sdpFilePath); } catch { /* ignore */ }
+  }
 
   recordingProcesses.delete(sessionId);
 
@@ -212,35 +358,41 @@ const stopRecording = async (sessionId) => {
       const stats = statSync(tempFilePath);
       fileSize = stats.size;
 
-      const uploadPath = `recordings/${sessionId}/${recordingId}.mp4`;
-      const { error: uploadError } = await supabaseAdmin.storage
-        .from(env.SUPABASE_STORAGE_BUCKET)
-        .upload(uploadPath, readFileSync(tempFilePath), {
-          contentType: 'video/mp4',
-          upsert: true
-        });
-
-      if (!uploadError) {
-        const { data: urlData } = supabaseAdmin.storage
-          .from(env.SUPABASE_STORAGE_BUCKET)
-          .getPublicUrl(uploadPath);
-
-        fileUrl = urlData.publicUrl;
-        status = 'ready';
-
-        const startedAt = processInfo.startedAt;
-        if (startedAt) {
-          durationSeconds = Math.floor((Date.now() - startedAt.getTime()) / 1000);
-        }
-
-        try {
-          unlinkSync(tempFilePath);
-        } catch (err) {
-          logger.warn({ event: 'temp_file_delete_failed', path: tempFilePath, error: err.message });
-        }
-      } else {
-        logger.error({ event: 'storage_upload_failed', error: uploadError.message });
+      if (fileSize < 1024) {
+        // File too small — likely no media was received
+        logger.warn({ event: 'recording_file_too_small', sessionId, fileSize });
         status = 'error';
+      } else {
+        const uploadPath = `recordings/${sessionId}/${recordingId}.webm`;
+        const { error: uploadError } = await supabaseAdmin.storage
+          .from(env.SUPABASE_STORAGE_BUCKET)
+          .upload(uploadPath, readFileSync(tempFilePath), {
+            contentType: 'video/webm',
+            upsert: true
+          });
+
+        if (!uploadError) {
+          const { data: urlData } = supabaseAdmin.storage
+            .from(env.SUPABASE_STORAGE_BUCKET)
+            .getPublicUrl(uploadPath);
+
+          fileUrl = urlData.publicUrl;
+          status = 'ready';
+
+          const startedAt = processInfo.startedAt;
+          if (startedAt) {
+            durationSeconds = Math.floor((Date.now() - startedAt.getTime()) / 1000);
+          }
+        } else {
+          logger.error({ event: 'storage_upload_failed', error: uploadError.message });
+          status = 'error';
+        }
+      }
+
+      try {
+        unlinkSync(tempFilePath);
+      } catch (err) {
+        logger.warn({ event: 'temp_file_delete_failed', path: tempFilePath, error: err.message });
       }
     } else {
       logger.warn({ event: 'temp_file_not_found', path: tempFilePath });
@@ -311,20 +463,23 @@ const cancelRecording = (sessionId) => {
     processInfo.ffmpegProcess.kill('SIGTERM');
   }
 
-  for (const consumer of processInfo.plainTransportConsumers || []) {
-    consumer.close();
+  for (const consumer of processInfo.consumers || []) {
+    try { consumer.close(); } catch { /* ignore */ }
   }
 
-  const plainTransport = processInfo.plainTransportId
-    ? mediasoupService.getPlainTransport(sessionId, processInfo.plainTransportId)
-    : null;
-  plainTransport?.close();
+  const closeTransport = (id) => {
+    if (id) {
+      const t = mediasoupService.getPlainTransport(sessionId, id);
+      t?.close();
+    }
+  };
+  closeTransport(processInfo.audioPlainTransportId);
+  closeTransport(processInfo.videoPlainTransportId);
 
-  if (existsSync(processInfo.tempFilePath)) {
-    try {
-      unlinkSync(processInfo.tempFilePath);
-    } catch (err) {
-      logger.warn({ event: 'temp_file_delete_failed', path: processInfo.tempFilePath, error: err.message });
+  // Clean up temp files
+  for (const filePath of [processInfo.tempFilePath, processInfo.sdpFilePath]) {
+    if (filePath && existsSync(filePath)) {
+      try { unlinkSync(filePath); } catch { /* ignore */ }
     }
   }
 

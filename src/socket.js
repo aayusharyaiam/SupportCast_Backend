@@ -287,6 +287,21 @@ export const initSocketServer = (httpServer) => {
     socket.on('end-session', handleSocketEvent(socket, async ({ sessionId }, ack) => {
       authorizeAgent(socket);
       authorizeSession(socket, sessionId);
+
+      // Stop any active recording before ending the session
+      try {
+        const recording = await recordingService.stopRecording(sessionId);
+        io.to(sessionId).emit('recording-status', {
+          sessionId,
+          status: recording.status,
+          recordingId: recording.id,
+          fileUrl: recording.file_url
+        });
+      } catch {
+        // No active recording — that's fine, just clean up in case
+        recordingService.cancelRecording(sessionId);
+      }
+
       await sessionService.endSession({ sessionId, endedBy: socket.user.role });
       io.to(sessionId).emit('session-ended', { sessionId, endedBy: socket.user.role });
       ack?.({ ok: true });
