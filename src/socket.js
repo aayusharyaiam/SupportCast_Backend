@@ -186,7 +186,11 @@ export const initSocketServer = (httpServer) => {
       authorizeAgent(socket);
       authorizeSession(socket, sessionId);
       const recording = await recordingService.startRecording(sessionId);
-      io.to(sessionId).emit('recording-status', { status: recording.status });
+      io.to(sessionId).emit('recording-status', {
+        sessionId,
+        status: recording.status,
+        recordingId: recording.id
+      });
       ack?.({ ok: true, data: recording });
     }));
 
@@ -194,7 +198,12 @@ export const initSocketServer = (httpServer) => {
       authorizeAgent(socket);
       authorizeSession(socket, sessionId);
       const recording = await recordingService.stopRecording(sessionId);
-      io.to(sessionId).emit('recording-status', { status: recording.status });
+      io.to(sessionId).emit('recording-status', {
+        sessionId,
+        status: recording.status,
+        recordingId: recording.id,
+        fileUrl: recording.file_url
+      });
       ack?.({ ok: true, data: recording });
     }));
 

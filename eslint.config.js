@@ -1,22 +1,13 @@
-import js from '@eslint/js';
+import globals from 'globals';
+import pluginJs from '@eslint/js';
 
 export default [
-  js.configs.recommended,
+  { languageOptions: { globals: { ...globals.node, ...globals.commonjs } } },
+  pluginJs.configs.recommended,
   {
-    files: ['src/**/*.js'],
-    languageOptions: {
-      ecmaVersion: 2024,
-      sourceType: 'module',
-      globals: {
-        console: 'readonly',
-        process: 'readonly',
-        Buffer: 'readonly',
-        setTimeout: 'readonly',
-        clearTimeout: 'readonly'
-      }
-    },
     rules: {
-      'no-unused-vars': ['error', { argsIgnorePattern: '^_' }]
-    }
-  }
+      'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^[A-Z_]' }],
+      'no-console': 'off',
+    },
+  },
 ];

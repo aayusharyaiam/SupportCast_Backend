@@ -1,4 +1,7 @@
 import * as mediasoup from 'mediasoup';
+import { spawn } from 'child_process';
+import { createWriteStream, existsSync, mkdirSync } from 'fs';
+import { join } from 'path';
 import { mediasoupConfig } from '../config/mediasoup.js';
 import { metrics } from './metrics.service.js';
 import { AppError } from '../utils/errors.js';
@@ -6,7 +9,6 @@ import { logger } from '../utils/logger.js';
 
 let worker;
 const rooms = new Map();
-const reconnectWindows = new Map();
 
 export const initMediasoup = async () => {
   worker = await mediasoup.createWorker(mediasoupConfig.worker);
@@ -36,7 +38,8 @@ const getOrCreateRoom = async (sessionId) => {
   const room = {
     sessionId,
     router,
-    peers: new Map()
+    peers: new Map(),
+    plainTransports: new Map()
   };
 
   rooms.set(sessionId, room);
@@ -171,6 +174,52 @@ const resumeConsumer = async ({ sessionId, socketId, consumerId }) => {
   await consumer.resume();
 };
 
+const createPlainTransport = async (sessionId) => {
+  const room = rooms.get(sessionId);
+  if (!room) {
+    throw new AppError('ROOM_NOT_FOUND', 'Session room not found.', 404);
+  }
+
+  const plainTransport = await room.router.createPlainTransport({
+    listenIp: { ip: '0.0.0.0', announcedIp: mediasoupConfig.webRtcTransport.listenIps[0].announcedIp },
+    enableRtp: true,
+    enableTcp: false,
+    preferUdp: true
+  });
+
+  room.plainTransports.set(plainTransport.id, plainTransport);
+
+  return {
+    id: plainTransport.id,
+    ip: plainTransport.tuple.localIp,
+    port: plainTransport.tuple.localPort
+  };
+};
+
+const pipeProducersToPlainTransport = async (sessionId, plainTransportId, io) => {
+  const room = rooms.get(sessionId);
+  if (!room) return;
+
+  const plainTransport = room.plainTransports.get(plainTransportId);
+  if (!plainTransport) return;
+
+  for (const [, peer] of room.peers) {
+    for (const [, producer] of peer.producers) {
+      try {
+        await producer.pipeToPlainTransport(plainTransport);
+      } catch (err) {
+        logger.error({ event: 'pipe_producer_failed', producerId: producer.id, error: err.message });
+      }
+    }
+  }
+};
+
+const getPlainTransport = (sessionId, plainTransportId) => {
+  const room = rooms.get(sessionId);
+  if (!room) return null;
+  return room.plainTransports.get(plainTransportId) || null;
+};
+
 const cleanupPeer = (sessionId, socketId) => {
   const room = rooms.get(sessionId);
   const peer = room?.peers.get(socketId);
@@ -186,6 +235,10 @@ const cleanupPeer = (sessionId, socketId) => {
   metrics.connectedParticipants.dec();
 
   if (room.peers.size === 0) {
+    for (const [, transport] of room.plainTransports) {
+      transport.close();
+    }
+    room.plainTransports.clear();
     room.router.close();
     rooms.delete(sessionId);
     metrics.activeSessions.set(rooms.size);
@@ -222,8 +275,10 @@ export const mediasoupService = {
   produce,
   consume,
   resumeConsumer,
+  createPlainTransport,
+  pipeProducersToPlainTransport,
+  getPlainTransport,
   cleanupPeer,
   getOtherProducers,
   rooms,
-  reconnectWindows
 };
