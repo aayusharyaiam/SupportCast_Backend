@@ -14,6 +14,10 @@ import { notFoundHandler } from './utils/errors.js';
 export const createApp = () => {
   const app = express();
 
+  app.get('/', (req, res) => {
+    res.status(200).json({ status: 'ok', message: 'SupportCast API is running' });
+  });
+
   app.disable('x-powered-by');
   app.use(helmet());
   app.use(
