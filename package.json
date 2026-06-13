@@ -13,7 +13,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "jest --passWithNoTests"
+    "test": "jest --passWithNoTests",
+    "seed": "node scripts/seed-demo.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
