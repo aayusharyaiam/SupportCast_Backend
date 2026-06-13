@@ -197,6 +197,10 @@ export const initSocketServer = (httpServer) => {
     socket.on('stop-recording', handleSocketEvent(socket, async ({ sessionId }, ack) => {
       authorizeAgent(socket);
       authorizeSession(socket, sessionId);
+      io.to(sessionId).emit('recording-status', {
+        sessionId,
+        status: 'processing'
+      });
       const recording = await recordingService.stopRecording(sessionId);
       io.to(sessionId).emit('recording-status', {
         sessionId,

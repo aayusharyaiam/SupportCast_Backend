@@ -1,7 +1,4 @@
 import * as mediasoup from 'mediasoup';
-import { spawn } from 'child_process';
-import { createWriteStream, existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
 import { mediasoupConfig } from '../config/mediasoup.js';
 import { metrics } from './metrics.service.js';
 import { AppError } from '../utils/errors.js';
@@ -196,22 +193,35 @@ const createPlainTransport = async (sessionId) => {
   };
 };
 
-const pipeProducersToPlainTransport = async (sessionId, plainTransportId, io) => {
+const pipeProducersToPlainTransport = async (sessionId, plainTransportId) => {
   const room = rooms.get(sessionId);
-  if (!room) return;
+  if (!room) return [];
 
   const plainTransport = room.plainTransports.get(plainTransportId);
-  if (!plainTransport) return;
+  if (!plainTransport) return [];
+
+  const consumers = [];
 
   for (const [, peer] of room.peers) {
     for (const [, producer] of peer.producers) {
       try {
-        await producer.pipeToPlainTransport(plainTransport);
+        if (!room.router.canConsume({ producerId: producer.id, rtpCapabilities: room.router.rtpCapabilities })) {
+          continue;
+        }
+
+        const consumer = await plainTransport.consume({
+          producerId: producer.id,
+          rtpCapabilities: room.router.rtpCapabilities,
+          paused: false
+        });
+        consumers.push(consumer);
       } catch (err) {
         logger.error({ event: 'pipe_producer_failed', producerId: producer.id, error: err.message });
       }
     }
   }
+
+  return consumers;
 };
 
 const getPlainTransport = (sessionId, plainTransportId) => {

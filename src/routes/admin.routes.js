@@ -11,7 +11,10 @@ const router = Router();
 const emptyBody = z.any().optional();
 const paginationQuery = z.object({
   page: z.coerce.number().int().positive().optional(),
-  limit: z.coerce.number().int().min(1).max(100).optional()
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  date_from: z.string().datetime().optional(),
+  date_to: z.string().datetime().optional(),
+  search: z.string().max(100).optional(),
 });
 
 router.use(authenticate, roleGuard('admin'));

@@ -23,17 +23,33 @@ const history = async (req, res) => {
   const from = (page - 1) * limit;
   const to = from + limit - 1;
 
-  const { data, error, count } = await supabaseAdmin
+  let query = supabaseAdmin
     .from('sessions')
     .select('*, agents(*), participants(*), recordings(*)', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(from, to);
 
+  if (req.validated.query.date_from) {
+    query = query.gte('created_at', req.validated.query.date_from);
+  }
+  if (req.validated.query.date_to) {
+    query = query.lte('created_at', req.validated.query.date_to);
+  }
+  if (req.validated.query.search) {
+    query = query.or(`id.ilike.%${req.validated.query.search}%`);
+  }
+
+  const { data, error, count } = await query;
+
   if (error) {
     throw new AppError('ADMIN_HISTORY_FAILED', error.message, 500);
   }
 
-  successResponse(res, data, 200, {
+  res.status(200).json({
+    success: true,
+    data,
+    error: null,
+    timestamp: new Date().toISOString(),
     pagination: {
       page,
       limit,

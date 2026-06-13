@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
-import { createWriteStream, existsSync, mkdirSync, unlinkSync, statSync } from 'fs';
-import { join, dirname } from 'path';
+import { existsSync, mkdirSync, unlinkSync, statSync, readFileSync } from 'fs';
+import { join } from 'path';
 import { supabaseAdmin } from '../config/supabase.js';
 import { mediasoupService } from './mediasoup.service.js';
 import { metrics } from './metrics.service.js';
@@ -9,6 +9,37 @@ import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 
 const recordingProcesses = new Map();
+
+const waitForFfmpegStartup = (ffmpegProcess) => new Promise((resolve, reject) => {
+  const startupTimer = setTimeout(resolve, 500);
+
+  ffmpegProcess.once('error', (err) => {
+    clearTimeout(startupTimer);
+    reject(err);
+  });
+
+  ffmpegProcess.once('exit', (code) => {
+    clearTimeout(startupTimer);
+    if (code !== 0) {
+      reject(new Error(`FFmpeg exited before recording started with code ${code}`));
+    } else {
+      resolve();
+    }
+  });
+});
+
+const waitForFfmpegExit = (ffmpegProcess) => new Promise((resolve) => {
+  if (!ffmpegProcess || ffmpegProcess.exitCode !== null) {
+    resolve();
+    return;
+  }
+
+  const exitTimer = setTimeout(resolve, 3000);
+  ffmpegProcess.once('exit', () => {
+    clearTimeout(exitTimer);
+    resolve();
+  });
+});
 
 const ensureTempDir = () => {
   const dir = env.RECORDING_TEMP_DIR || '/tmp/recordings';
@@ -49,6 +80,7 @@ const startRecording = async (sessionId) => {
 
   let ffmpegProcess = null;
   let plainTransportInfo = null;
+  let plainTransportConsumers = [];
 
   try {
     plainTransportInfo = await mediasoupService.createPlainTransport(sessionId);
@@ -77,10 +109,32 @@ const startRecording = async (sessionId) => {
       logger.info({ event: 'ffmpeg_exit', sessionId, code });
     });
 
-    await mediasoupService.pipeProducersToPlainTransport(sessionId, plainTransportInfo.id);
+    await waitForFfmpegStartup(ffmpegProcess);
+    plainTransportConsumers = await mediasoupService.pipeProducersToPlainTransport(sessionId, plainTransportInfo.id);
 
   } catch (ffmpegError) {
-    logger.warn({ event: 'ffmpeg_not_available', error: ffmpegError.message });
+    metrics.recordingErrors.inc();
+    logger.error({ event: 'recording_start_failed', sessionId, error: ffmpegError.message });
+
+    if (ffmpegProcess) {
+      ffmpegProcess.kill('SIGTERM');
+    }
+
+    const plainTransport = plainTransportInfo?.id
+      ? mediasoupService.getPlainTransport(sessionId, plainTransportInfo.id)
+      : null;
+    plainTransport?.close();
+
+    await supabaseAdmin
+      .from('recordings')
+      .update({
+        status: 'error',
+        stopped_at: new Date().toISOString(),
+        error_message: ffmpegError.message
+      })
+      .eq('id', data.id);
+
+    throw new AppError('RECORDING_START_FAILED', ffmpegError.message, 500);
   }
 
   const processInfo = {
@@ -89,6 +143,7 @@ const startRecording = async (sessionId) => {
     tempFilePath,
     startedAt: new Date(),
     ffmpegProcess,
+    plainTransportConsumers,
     plainTransportId: plainTransportInfo?.id,
     plainTransportPort: plainTransportInfo?.port
   };
@@ -118,7 +173,17 @@ const stopRecording = async (sessionId) => {
 
   if (ffmpegProcess) {
     ffmpegProcess.kill('SIGTERM');
+    await waitForFfmpegExit(ffmpegProcess);
   }
+
+  for (const consumer of processInfo.plainTransportConsumers || []) {
+    consumer.close();
+  }
+
+  const plainTransport = processInfo.plainTransportId
+    ? mediasoupService.getPlainTransport(sessionId, processInfo.plainTransportId)
+    : null;
+  plainTransport?.close();
 
   recordingProcesses.delete(sessionId);
 
@@ -135,7 +200,7 @@ const stopRecording = async (sessionId) => {
       const uploadPath = `recordings/${sessionId}/${recordingId}.mp4`;
       const { error: uploadError } = await supabaseAdmin.storage
         .from(env.SUPABASE_STORAGE_BUCKET)
-        .upload(uploadPath, tempFilePath, {
+        .upload(uploadPath, readFileSync(tempFilePath), {
           contentType: 'video/mp4',
           upsert: true
         });
@@ -155,8 +220,8 @@ const stopRecording = async (sessionId) => {
 
         try {
           unlinkSync(tempFilePath);
-        } catch (e) {
-          logger.warn({ event: 'temp_file_delete_failed', path: tempFilePath });
+        } catch (err) {
+          logger.warn({ event: 'temp_file_delete_failed', path: tempFilePath, error: err.message });
         }
       } else {
         logger.error({ event: 'storage_upload_failed', error: uploadError.message });
@@ -231,10 +296,21 @@ const cancelRecording = (sessionId) => {
     processInfo.ffmpegProcess.kill('SIGTERM');
   }
 
+  for (const consumer of processInfo.plainTransportConsumers || []) {
+    consumer.close();
+  }
+
+  const plainTransport = processInfo.plainTransportId
+    ? mediasoupService.getPlainTransport(sessionId, processInfo.plainTransportId)
+    : null;
+  plainTransport?.close();
+
   if (existsSync(processInfo.tempFilePath)) {
     try {
       unlinkSync(processInfo.tempFilePath);
-    } catch (e) {}
+    } catch (err) {
+      logger.warn({ event: 'temp_file_delete_failed', path: processInfo.tempFilePath, error: err.message });
+    }
   }
 
   recordingProcesses.delete(sessionId);
