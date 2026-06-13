@@ -17,6 +17,15 @@ const paginationQuery = z.object({
   search: z.string().max(100).optional(),
 });
 
+const createAgentBody = z.object({
+  email: z.string().email('Invalid email address'),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+  displayName: z.string().min(2, 'Display name must be at least 2 characters').max(100),
+  role: z.enum(['agent', 'admin']).optional().default('agent'),
+});
+
+const agentParams = z.object({ id: z.string().uuid() });
+
 router.use(authenticate, roleGuard('admin'));
 
 router.get(
@@ -41,6 +50,24 @@ router.delete(
     })
   ),
   asyncHandler(adminController.forceEnd)
+);
+
+router.post(
+  '/agents',
+  validate(z.object({ body: createAgentBody, params: z.object({}), query: z.object({}) })),
+  asyncHandler(adminController.createAgent)
+);
+
+router.get(
+  '/agents',
+  validate(z.object({ body: emptyBody, params: z.object({}), query: z.object({}) })),
+  asyncHandler(adminController.getAgents)
+);
+
+router.delete(
+  '/agents/:id',
+  validate(z.object({ body: emptyBody, params: agentParams, query: z.object({}) })),
+  asyncHandler(adminController.deleteAgent)
 );
 
 export default router;
