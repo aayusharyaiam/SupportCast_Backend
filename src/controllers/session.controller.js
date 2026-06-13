@@ -2,6 +2,7 @@ import { inviteService } from '../services/invite.service.js';
 import { sessionService } from '../services/session.service.js';
 import { chatService } from '../services/chat.service.js';
 import { recordingService } from '../services/recording.service.js';
+import { fileService } from '../services/file.service.js';
 import { successResponse, emptyResponse } from '../utils/response.js';
 import { AppError } from '../utils/errors.js';
 
@@ -77,6 +78,19 @@ const recordingStatus = async (req, res) => {
   successResponse(res, recording);
 };
 
+const getFileSignedUrl = async (req, res) => {
+  const session = await sessionService.getById(req.validated.params.id);
+  ensureSessionAccess(req, session);
+  const { fileName, fileType, fileSize } = req.validated.body;
+  const signed = await fileService.getSignedUploadUrl({
+    sessionId: session.id,
+    fileName,
+    fileType,
+    fileSize
+  });
+  successResponse(res, signed);
+};
+
 const ensureSessionAccess = (req, session) => {
   if (req.agent?.role === 'admin') {
     return;
@@ -100,5 +114,6 @@ export const sessionController = {
   join,
   end,
   chatHistory,
-  recordingStatus
+  recordingStatus,
+  getFileSignedUrl
 };

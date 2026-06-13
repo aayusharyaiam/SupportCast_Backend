@@ -8,6 +8,9 @@ import { sessionService } from './services/session.service.js';
 import { AppError } from './utils/errors.js';
 import { logger } from './utils/logger.js';
 
+let ioServer = null;
+const disconnectTimers = new Map();
+
 export const initSocketServer = (httpServer) => {
   const io = new Server(httpServer, {
     cors: {
@@ -15,6 +18,7 @@ export const initSocketServer = (httpServer) => {
       credentials: true
     }
   });
+  ioServer = io;
 
   io.use(async (socket, next) => {
     try {
@@ -32,6 +36,28 @@ export const initSocketServer = (httpServer) => {
     socket.on('join-session', handleSocketEvent(socket, async (payload, ack) => {
       const { sessionId, name } = payload;
       authorizeSession(socket, sessionId);
+
+      const timerKey = `${sessionId}:${socket.user.id}`;
+      const existingTimer = disconnectTimers.get(timerKey);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        disconnectTimers.delete(timerKey);
+        const existingPeer = mediasoupService.getPeerInfo(sessionId, socket.id);
+        if (existingPeer) {
+          const existingProducers = mediasoupService.getOtherProducers(sessionId, socket.id);
+          ack?.({
+            ok: true,
+            data: {
+              sessionId,
+              role: socket.user.role,
+              participantId: existingPeer.participantId,
+              producers: existingProducers,
+              reconnected: true
+            }
+          });
+          return;
+        }
+      }
 
       let participantId = socket.user.id;
       let displayName = name || socket.user.displayName || socket.user.email || socket.user.role;
@@ -164,6 +190,26 @@ export const initSocketServer = (httpServer) => {
       ack?.({ ok: true, data: saved });
     }));
 
+    socket.on('share-file', handleSocketEvent(socket, async ({ sessionId, fileName, fileUrl, fileSize, fileType }, ack) => {
+      authorizeSession(socket, sessionId);
+      if (!fileName || !fileUrl) {
+        throw new AppError('INVALID_FILE', 'File name and URL are required.', 400);
+      }
+
+      const saved = await chatService.saveFileMessage({
+        sessionId,
+        senderRole: socket.user.role,
+        senderName: socket.user.displayName || socket.user.email || socket.user.role,
+        fileName,
+        fileUrl,
+        fileSize: fileSize || 0,
+        fileType: fileType || 'application/octet-stream'
+      });
+
+      io.to(sessionId).emit('chat-message', saved);
+      ack?.({ ok: true, data: saved });
+    }));
+
     socket.on('mute-audio', handleSocketEvent(socket, async ({ sessionId, muted }, ack) => {
       authorizeSession(socket, sessionId);
       socket.to(sessionId).emit('participant-audio-muted', {
@@ -220,19 +266,29 @@ export const initSocketServer = (httpServer) => {
 
     socket.on('disconnect', () => {
       const sessionId = socket.data.sessionId;
-      if (sessionId) {
-        mediasoupService.cleanupPeer(sessionId, socket.id);
-        socket.to(sessionId).emit('participant-left', {
-          participantId: socket.data.participantId
-        });
-      }
+      const participantId = socket.data.participantId;
 
-      logger.info({ event: 'socket_disconnected', socketId: socket.id });
+      if (sessionId && participantId) {
+        const timerKey = `${sessionId}:${participantId}`;
+        const timer = setTimeout(() => {
+          mediasoupService.cleanupPeer(sessionId, socket.id);
+          io.to(sessionId).emit('participant-left', { participantId });
+          disconnectTimers.delete(timerKey);
+          logger.info({ event: 'participant_grace_expired', sessionId, participantId });
+        }, 30000);
+
+        disconnectTimers.set(timerKey, timer);
+        logger.info({ event: 'socket_disconnected_grace_start', socketId: socket.id, sessionId, participantId });
+      } else {
+        logger.info({ event: 'socket_disconnected', socketId: socket.id });
+      }
     });
   });
 
   return io;
 };
+
+export const getSocketServer = () => ioServer;
 
 const handleSocketEvent = (socket, handler) => async (payload, ack) => {
   try {

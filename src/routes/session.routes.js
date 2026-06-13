@@ -82,4 +82,22 @@ router.get(
   asyncHandler(sessionController.recordingStatus)
 );
 
+router.post(
+  '/:id/files/signed-url',
+  authenticate,
+  roleGuard('agent', 'admin', 'customer'),
+  validate(
+    z.object({
+      body: z.object({
+        fileName: z.string().min(1).max(255),
+        fileType: z.string().min(1).max(100),
+        fileSize: z.number().int().positive().max(10 * 1024 * 1024)
+      }),
+      params: idParams,
+      query: z.object({})
+    })
+  ),
+  asyncHandler(sessionController.getFileSignedUrl)
+);
+
 export default router;

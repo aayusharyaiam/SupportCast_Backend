@@ -2,12 +2,13 @@ import { supabaseAdmin } from '../config/supabase.js';
 import { sessionService } from '../services/session.service.js';
 import { successResponse, emptyResponse } from '../utils/response.js';
 import { AppError } from '../utils/errors.js';
+import { getSocketServer } from '../socket.js';
 
 const liveSessions = async (_req, res) => {
   const { data, error } = await supabaseAdmin
     .from('sessions')
     .select('*, agents(*), participants(*), recordings(*)')
-    .in('status', ['waiting', 'active'])
+    .eq('status', 'active')
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -61,6 +62,10 @@ const history = async (req, res) => {
 
 const forceEnd = async (req, res) => {
   await sessionService.endSession({ sessionId: req.validated.params.id, endedBy: 'admin' });
+  getSocketServer()?.to(req.validated.params.id).emit('session-ended', {
+    sessionId: req.validated.params.id,
+    endedBy: 'admin'
+  });
   emptyResponse(res);
 };
 

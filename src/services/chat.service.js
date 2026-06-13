@@ -22,6 +22,31 @@ const saveMessage = async ({ sessionId, senderRole, senderName, content }) => {
   return data;
 };
 
+const saveFileMessage = async ({ sessionId, senderRole, senderName, fileName, fileUrl, fileSize, fileType }) => {
+  const { data, error } = await supabaseAdmin
+    .from('chat_messages')
+    .insert({
+      session_id: sessionId,
+      sender_role: senderRole,
+      sender_name: senderName,
+      type: 'file',
+      content: null,
+      file_name: fileName,
+      file_url: fileUrl,
+      file_size: fileSize,
+      file_type: fileType
+    })
+    .select('*')
+    .single();
+
+  if (error) {
+    throw new AppError('FILE_MESSAGE_SAVE_FAILED', error.message, 500);
+  }
+
+  metrics.messagesSent.inc();
+  return data;
+};
+
 const getHistory = async (sessionId) => {
   const { data, error } = await supabaseAdmin
     .from('chat_messages')
@@ -38,5 +63,6 @@ const getHistory = async (sessionId) => {
 
 export const chatService = {
   saveMessage,
+  saveFileMessage,
   getHistory
 };

@@ -69,6 +69,14 @@ const getPeer = (sessionId, socketId) => {
   return { room, peer };
 };
 
+const getPeerInfo = (sessionId, socketId) => {
+  const room = rooms.get(sessionId);
+  if (!room) return null;
+  const peer = room.peers.get(socketId);
+  if (!peer) return null;
+  return { participantId: peer.participantId, role: peer.role, displayName: peer.displayName };
+};
+
 const getRtpCapabilities = async (sessionId) => {
   const room = await getOrCreateRoom(sessionId);
   return room.router.rtpCapabilities;
@@ -279,6 +287,8 @@ export const mediasoupService = {
   isReady,
   getOrCreateRoom,
   addPeer,
+  getPeer,
+  getPeerInfo,
   getRtpCapabilities,
   createWebRtcTransport,
   connectTransport,
