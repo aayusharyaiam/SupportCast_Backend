@@ -195,6 +195,9 @@ const startRecording = async (sessionId) => {
     logger.info({ event: 'sdp_generated', sessionId, sdpContent });
 
     // Build ffmpeg arguments with proper SDP input
+    let stderrOutput = '';
+
+    // Build ffmpeg arguments with proper SDP input
     const ffmpegArgs = [
       '-loglevel', 'warning',
       '-protocol_whitelist', 'file,udp,rtp',
@@ -204,10 +207,10 @@ const startRecording = async (sessionId) => {
 
     // Add codec handling
     if (videoConsumer) {
-      ffmpegArgs.push('-c:v', 'libvpx');
+      ffmpegArgs.push('-c:v', 'copy');
     }
     if (audioConsumer) {
-      ffmpegArgs.push('-c:a', 'libopus');
+      ffmpegArgs.push('-c:a', 'copy');
     }
 
     ffmpegArgs.push(
@@ -218,7 +221,6 @@ const startRecording = async (sessionId) => {
 
     ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
-    let stderrOutput = '';
     ffmpegProcess.stderr.on('data', (chunk) => {
       const text = chunk.toString();
       stderrOutput += text;
@@ -243,7 +245,8 @@ const startRecording = async (sessionId) => {
 
   } catch (ffmpegError) {
     metrics.recordingErrors.inc();
-    logger.error({ event: 'recording_start_failed', sessionId, error: ffmpegError.message });
+    const errorMsg = stderrOutput ? `${ffmpegError.message}. Stderr: ${stderrOutput.slice(-500)}` : ffmpegError.message;
+    logger.error({ event: 'recording_start_failed', sessionId, error: errorMsg });
 
     if (ffmpegProcess) {
       ffmpegProcess.kill('SIGTERM');
@@ -274,11 +277,11 @@ const startRecording = async (sessionId) => {
       .update({
         status: 'error',
         stopped_at: new Date().toISOString(),
-        error_message: ffmpegError.message
+        error_message: errorMsg
       })
       .eq('id', data.id);
 
-    throw new AppError('RECORDING_START_FAILED', ffmpegError.message, 500);
+    throw new AppError('RECORDING_START_FAILED', errorMsg, 500);
   }
 
   const processInfo = {
