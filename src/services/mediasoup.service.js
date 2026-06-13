@@ -5,6 +5,7 @@ import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 
 let worker;
+let webRtcServer;
 const rooms = new Map();
 
 export const initMediasoup = async () => {
@@ -14,6 +15,24 @@ export const initMediasoup = async () => {
     logger.error({ event: 'mediasoup_worker_died' });
     setTimeout(() => process.exit(1), 2000);
   });
+
+  // Create a shared WebRtcServer so all transports multiplex through a single port.
+  // This is required on platforms like Render that only expose limited ports.
+  try {
+    const serverConfig = mediasoupConfig.webRtcServer;
+    webRtcServer = await worker.createWebRtcServer(serverConfig);
+    logger.info({
+      event: 'webrtc_server_ready',
+      listenInfos: serverConfig.listenInfos
+    });
+  } catch (err) {
+    logger.warn({
+      event: 'webrtc_server_failed',
+      error: err.message,
+      hint: 'Falling back to per-transport ports. Set MEDIASOUP_LISTEN_PORT if needed.'
+    });
+    webRtcServer = null;
+  }
 
   logger.info({ event: 'mediasoup_worker_ready' });
   return worker;
@@ -84,7 +103,22 @@ const getRtpCapabilities = async (sessionId) => {
 
 const createWebRtcTransport = async ({ sessionId, socketId, direction }) => {
   const { room, peer } = getPeer(sessionId, socketId);
-  const transport = await room.router.createWebRtcTransport(mediasoupConfig.webRtcTransport);
+
+  let transport;
+
+  if (webRtcServer) {
+    // Use the shared WebRtcServer — all transports share the same port
+    transport = await room.router.createWebRtcTransport({
+      webRtcServer,
+      enableUdp: true,
+      enableTcp: true,
+      preferTcp: true,
+      initialAvailableOutgoingBitrate: mediasoupConfig.webRtcTransport.initialAvailableOutgoingBitrate
+    });
+  } else {
+    // Fallback: each transport gets its own port from the worker's port range
+    transport = await room.router.createWebRtcTransport(mediasoupConfig.webRtcTransport);
+  }
 
   transport.appData = { direction };
   peer.transports.set(transport.id, transport);

@@ -14,6 +14,10 @@ const envSchema = z.object({
   MEDIASOUP_MIN_PORT: z.coerce.number().int().default(10000),
   MEDIASOUP_MAX_PORT: z.coerce.number().int().default(10100),
   MEDIASOUP_ANNOUNCED_IP: z.string().default('127.0.0.1'),
+  MEDIASOUP_LISTEN_PORT: z.coerce.number().int().default(44444),
+  TURN_URLS: z.string().default(''),
+  TURN_USERNAME: z.string().default(''),
+  TURN_CREDENTIAL: z.string().default(''),
   RECORDING_TEMP_DIR: z.string().default('/tmp/recordings'),
   SUPABASE_STORAGE_BUCKET: z.string().default('recordings'),
   LOG_LEVEL: z.string().default('info')

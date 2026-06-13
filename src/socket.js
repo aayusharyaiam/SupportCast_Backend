@@ -108,6 +108,26 @@ export const initSocketServer = (httpServer) => {
       });
     }));
 
+    socket.on('get-ice-servers', handleSocketEvent(socket, async (_payload, ack) => {
+      const iceServers = [
+        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+      ];
+
+      // Add TURN servers if configured
+      if (env.TURN_URLS) {
+        const turnUrls = env.TURN_URLS.split(',').map(u => u.trim()).filter(Boolean);
+        if (turnUrls.length > 0) {
+          iceServers.push({
+            urls: turnUrls,
+            username: env.TURN_USERNAME,
+            credential: env.TURN_CREDENTIAL
+          });
+        }
+      }
+
+      ack?.({ ok: true, data: iceServers });
+    }));
+
     socket.on('get-rtp-capabilities', handleSocketEvent(socket, async ({ sessionId }, ack) => {
       authorizeSession(socket, sessionId);
       const rtpCapabilities = await mediasoupService.getRtpCapabilities(sessionId);

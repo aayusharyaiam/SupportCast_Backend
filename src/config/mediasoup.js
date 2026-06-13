@@ -56,7 +56,30 @@ export const getMediasoupConfig = () => ({
       }
     ]
   },
+  /**
+   * WebRtcServer lets us multiplex ALL WebRTC transports through a single port
+   * instead of each transport opening its own random port. This is critical
+   * for Render.com and similar PaaS platforms that only expose limited ports.
+   */
+  webRtcServer: {
+    listenInfos: [
+      {
+        protocol: 'udp',
+        ip: '0.0.0.0',
+        announcedAddress: resolvedAnnouncedIp,
+        port: env.MEDIASOUP_LISTEN_PORT
+      },
+      {
+        protocol: 'tcp',
+        ip: '0.0.0.0',
+        announcedAddress: resolvedAnnouncedIp,
+        port: env.MEDIASOUP_LISTEN_PORT
+      }
+    ]
+  },
   webRtcTransport: {
+    // When using webRtcServer, listenIps is NOT needed — the server handles it.
+    // These are fallback settings for when webRtcServer is not used.
     listenIps: [
       {
         ip: '0.0.0.0',
@@ -65,7 +88,7 @@ export const getMediasoupConfig = () => ({
     ],
     enableUdp: true,
     enableTcp: true,
-    preferUdp: true,
+    preferTcp: true,
     initialAvailableOutgoingBitrate: 1_000_000
   }
 });

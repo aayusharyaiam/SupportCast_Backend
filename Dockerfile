@@ -13,5 +13,7 @@ COPY . .
 
 ENV NODE_ENV=production
 EXPOSE 3001
+EXPOSE 44444/udp
+EXPOSE 44444/tcp
 
 CMD ["npm", "start"]
