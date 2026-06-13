@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { createApp } from './app.js';
 import { env } from './config/env.js';
+import { resolveAnnouncedIp } from './config/mediasoup.js';
 import { initSocketServer } from './socket.js';
 import { initMediasoup } from './services/mediasoup.service.js';
 import { logger } from './utils/logger.js';
@@ -8,6 +9,7 @@ import { logger } from './utils/logger.js';
 const app = createApp();
 const server = http.createServer(app);
 
+await resolveAnnouncedIp();
 await initMediasoup();
 initSocketServer(server);
 

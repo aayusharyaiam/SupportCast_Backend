@@ -1,6 +1,38 @@
 import { env } from './env.js';
+import { logger } from '../utils/logger.js';
 
-export const mediasoupConfig = {
+let resolvedAnnouncedIp = env.MEDIASOUP_ANNOUNCED_IP;
+
+/**
+ * Detect public IP at startup when running in production with default 127.0.0.1.
+ * Without this, cross-device WebRTC connections fail because ICE candidates
+ * point to localhost instead of the server's public IP.
+ */
+export const resolveAnnouncedIp = async () => {
+  if (
+    env.NODE_ENV === 'production' &&
+    (!resolvedAnnouncedIp || resolvedAnnouncedIp === '127.0.0.1')
+  ) {
+    try {
+      const response = await fetch('https://api.ipify.org?format=json');
+      const data = await response.json();
+      if (data.ip) {
+        resolvedAnnouncedIp = data.ip;
+        logger.info({ event: 'public_ip_resolved', ip: resolvedAnnouncedIp });
+      }
+    } catch (err) {
+      logger.warn({
+        event: 'public_ip_resolve_failed',
+        error: err.message,
+        fallback: resolvedAnnouncedIp,
+        hint: 'Set MEDIASOUP_ANNOUNCED_IP to your server public IP'
+      });
+    }
+  }
+  return resolvedAnnouncedIp;
+};
+
+export const getMediasoupConfig = () => ({
   worker: {
     logLevel: 'warn',
     rtcMinPort: env.MEDIASOUP_MIN_PORT,
@@ -28,7 +60,7 @@ export const mediasoupConfig = {
     listenIps: [
       {
         ip: '0.0.0.0',
-        announcedIp: env.MEDIASOUP_ANNOUNCED_IP
+        announcedIp: resolvedAnnouncedIp
       }
     ],
     enableUdp: true,
@@ -36,4 +68,11 @@ export const mediasoupConfig = {
     preferUdp: true,
     initialAvailableOutgoingBitrate: 1_000_000
   }
-};
+});
+
+// Legacy export for compatibility — uses resolved IP
+export const mediasoupConfig = new Proxy({}, {
+  get(_, prop) {
+    return getMediasoupConfig()[prop];
+  }
+});
