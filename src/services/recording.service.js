@@ -61,7 +61,22 @@ const startRecording = async (sessionId) => {
     .maybeSingle();
 
   if (existingRecording) {
-    throw new AppError('RECORDING_ALREADY_ACTIVE', 'A recording is already in progress for this session.', 409);
+    // Check if there's actually a live recording process in memory.
+    // After a server restart/redeploy the DB row is stale — no ffmpeg is running.
+    if (recordingProcesses.has(sessionId)) {
+      throw new AppError('RECORDING_ALREADY_ACTIVE', 'A recording is already in progress for this session.', 409);
+    }
+
+    // Stale DB row from a previous server instance — clean it up
+    logger.warn({ event: 'stale_recording_cleaned', sessionId, recordingId: existingRecording.id });
+    await supabaseAdmin
+      .from('recordings')
+      .update({
+        status: 'error',
+        stopped_at: new Date().toISOString(),
+        error_message: 'Recording interrupted by server restart'
+      })
+      .eq('id', existingRecording.id);
   }
 
   const { data, error } = await supabaseAdmin
