@@ -53,6 +53,7 @@ export const verifySocketToken = async (token) => {
   return {
     id: data.user.id,
     email: data.user.email,
+    displayName: data.user.user_metadata?.display_name || data.user.user_metadata?.displayName || null,
     role: data.user.user_metadata?.role || 'agent',
     type: 'agent'
   };

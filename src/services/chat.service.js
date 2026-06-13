@@ -22,7 +22,7 @@ const saveMessage = async ({ sessionId, senderRole, senderName, content }) => {
   return data;
 };
 
-const saveFileMessage = async ({ sessionId, senderRole, senderName, fileName, fileUrl, fileSize, fileType }) => {
+const saveFileMessage = async ({ sessionId, senderRole, senderName, fileName, fileUrl, fileSize }) => {
   const { data, error } = await supabaseAdmin
     .from('chat_messages')
     .insert({
@@ -33,8 +33,7 @@ const saveFileMessage = async ({ sessionId, senderRole, senderName, fileName, fi
       content: null,
       file_name: fileName,
       file_url: fileUrl,
-      file_size: fileSize,
-      file_type: fileType
+      file_size: fileSize
     })
     .select('*')
     .single();

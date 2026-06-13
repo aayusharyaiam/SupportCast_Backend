@@ -183,9 +183,11 @@ export const initSocketServer = (httpServer) => {
         throw new AppError('MSG_TOO_LONG', 'Message must be 2000 characters or fewer.', 400);
       }
 
+      const dbSenderRole = socket.user.role === 'admin' ? 'agent' : socket.user.role;
+
       const saved = await chatService.saveMessage({
         sessionId,
-        senderRole: socket.user.role,
+        senderRole: dbSenderRole,
         senderName: socket.user.displayName || socket.user.email || socket.user.role,
         content: message.trim()
       });
@@ -200,14 +202,15 @@ export const initSocketServer = (httpServer) => {
         throw new AppError('INVALID_FILE', 'File name and URL are required.', 400);
       }
 
+      const dbSenderRole = socket.user.role === 'admin' ? 'agent' : socket.user.role;
+
       const saved = await chatService.saveFileMessage({
         sessionId,
-        senderRole: socket.user.role,
+        senderRole: dbSenderRole,
         senderName: socket.user.displayName || socket.user.email || socket.user.role,
         fileName,
         fileUrl,
-        fileSize: fileSize || 0,
-        fileType: fileType || 'application/octet-stream'
+        fileSize: fileSize || 0
       });
 
       io.to(sessionId).emit('chat-message', saved);
