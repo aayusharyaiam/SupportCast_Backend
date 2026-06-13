@@ -1,0 +1,251 @@
+import { Server } from 'socket.io';
+import { env } from './config/env.js';
+import { verifySocketToken } from './middleware/authenticate.js';
+import { chatService } from './services/chat.service.js';
+import { mediasoupService } from './services/mediasoup.service.js';
+import { recordingService } from './services/recording.service.js';
+import { sessionService } from './services/session.service.js';
+import { AppError } from './utils/errors.js';
+import { logger } from './utils/logger.js';
+
+export const initSocketServer = (httpServer) => {
+  const io = new Server(httpServer, {
+    cors: {
+      origin: env.FRONTEND_URL,
+      credentials: true
+    }
+  });
+
+  io.use(async (socket, next) => {
+    try {
+      const user = await verifySocketToken(socket.handshake.auth?.token);
+      socket.user = user;
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  io.on('connection', (socket) => {
+    logger.info({ event: 'socket_connected', socketId: socket.id, userId: socket.user.id });
+
+    socket.on('join-session', handleSocketEvent(socket, async (payload, ack) => {
+      const { sessionId, name } = payload;
+      authorizeSession(socket, sessionId);
+
+      let participantId = socket.user.id;
+      let displayName = name || socket.user.displayName || socket.user.email || socket.user.role;
+
+      if (socket.user.type === 'agent') {
+        const session = await sessionService.getById(sessionId);
+        await sessionService.logEvent({
+          sessionId,
+          eventType: 'participant_joined',
+          actorRole: 'agent',
+          actorName: displayName
+        });
+        participantId = session.agent_id;
+      }
+
+      await mediasoupService.addPeer({
+        sessionId,
+        socketId: socket.id,
+        participantId,
+        role: socket.user.role,
+        displayName
+      });
+
+      socket.data.sessionId = sessionId;
+      socket.data.participantId = participantId;
+      socket.join(sessionId);
+
+      socket.to(sessionId).emit('participant-joined', {
+        participantId,
+        name: displayName,
+        role: socket.user.role
+      });
+
+      const existingProducers = mediasoupService.getOtherProducers(sessionId, socket.id);
+
+      ack?.({
+        ok: true,
+        data: {
+          sessionId,
+          role: socket.user.role,
+          participantId,
+          producers: existingProducers
+        }
+      });
+    }));
+
+    socket.on('get-rtp-capabilities', handleSocketEvent(socket, async ({ sessionId }, ack) => {
+      authorizeSession(socket, sessionId);
+      const rtpCapabilities = await mediasoupService.getRtpCapabilities(sessionId);
+      ack?.({ ok: true, data: rtpCapabilities });
+    }));
+
+    socket.on('create-transport', handleSocketEvent(socket, async ({ sessionId, direction }, ack) => {
+      authorizeSession(socket, sessionId);
+      const transport = await mediasoupService.createWebRtcTransport({
+        sessionId,
+        socketId: socket.id,
+        direction
+      });
+      ack?.({ ok: true, data: transport });
+    }));
+
+    socket.on(
+      'connect-transport',
+      handleSocketEvent(socket, async ({ sessionId, transportId, dtlsParameters }, ack) => {
+        authorizeSession(socket, sessionId);
+        await mediasoupService.connectTransport({
+          sessionId,
+          socketId: socket.id,
+          transportId,
+          dtlsParameters
+        });
+        ack?.({ ok: true });
+      })
+    );
+
+    socket.on(
+      'produce',
+      handleSocketEvent(socket, async ({ sessionId, transportId, kind, rtpParameters }, ack) => {
+        authorizeSession(socket, sessionId);
+        const producer = await mediasoupService.produce({
+          sessionId,
+          socketId: socket.id,
+          transportId,
+          kind,
+          rtpParameters
+        });
+        socket.to(sessionId).emit('new-producer', producer);
+        ack?.({ ok: true, data: producer });
+      })
+    );
+
+    socket.on(
+      'consume',
+      handleSocketEvent(socket, async ({ sessionId, producerId, rtpCapabilities }, ack) => {
+        authorizeSession(socket, sessionId);
+        const consumer = await mediasoupService.consume({
+          sessionId,
+          socketId: socket.id,
+          producerId,
+          rtpCapabilities
+        });
+        ack?.({ ok: true, data: consumer });
+      })
+    );
+
+    socket.on('resume-consumer', handleSocketEvent(socket, async ({ sessionId, consumerId }, ack) => {
+      authorizeSession(socket, sessionId);
+      await mediasoupService.resumeConsumer({ sessionId, socketId: socket.id, consumerId });
+      ack?.({ ok: true });
+    }));
+
+    socket.on('send-chat', handleSocketEvent(socket, async ({ sessionId, message }, ack) => {
+      authorizeSession(socket, sessionId);
+      if (!message?.trim()) {
+        throw new AppError('EMPTY_MESSAGE', 'Message cannot be empty.', 400);
+      }
+      if (message.length > 2000) {
+        throw new AppError('MSG_TOO_LONG', 'Message must be 2000 characters or fewer.', 400);
+      }
+
+      const saved = await chatService.saveMessage({
+        sessionId,
+        senderRole: socket.user.role,
+        senderName: socket.user.displayName || socket.user.email || socket.user.role,
+        content: message.trim()
+      });
+
+      io.to(sessionId).emit('chat-message', saved);
+      ack?.({ ok: true, data: saved });
+    }));
+
+    socket.on('mute-audio', handleSocketEvent(socket, async ({ sessionId, muted }, ack) => {
+      authorizeSession(socket, sessionId);
+      socket.to(sessionId).emit('participant-audio-muted', {
+        participantId: socket.data.participantId,
+        muted: Boolean(muted)
+      });
+      ack?.({ ok: true });
+    }));
+
+    socket.on('toggle-video', handleSocketEvent(socket, async ({ sessionId, enabled }, ack) => {
+      authorizeSession(socket, sessionId);
+      socket.to(sessionId).emit('participant-video-toggled', {
+        participantId: socket.data.participantId,
+        enabled: Boolean(enabled)
+      });
+      ack?.({ ok: true });
+    }));
+
+    socket.on('start-recording', handleSocketEvent(socket, async ({ sessionId }, ack) => {
+      authorizeAgent(socket);
+      authorizeSession(socket, sessionId);
+      const recording = await recordingService.startRecording(sessionId);
+      io.to(sessionId).emit('recording-status', { status: recording.status });
+      ack?.({ ok: true, data: recording });
+    }));
+
+    socket.on('stop-recording', handleSocketEvent(socket, async ({ sessionId }, ack) => {
+      authorizeAgent(socket);
+      authorizeSession(socket, sessionId);
+      const recording = await recordingService.stopRecording(sessionId);
+      io.to(sessionId).emit('recording-status', { status: recording.status });
+      ack?.({ ok: true, data: recording });
+    }));
+
+    socket.on('end-session', handleSocketEvent(socket, async ({ sessionId }, ack) => {
+      authorizeSession(socket, sessionId);
+      await sessionService.endSession({ sessionId, endedBy: socket.user.role });
+      io.to(sessionId).emit('session-ended', { sessionId, endedBy: socket.user.role });
+      ack?.({ ok: true });
+    }));
+
+    socket.on('disconnect', () => {
+      const sessionId = socket.data.sessionId;
+      if (sessionId) {
+        mediasoupService.cleanupPeer(sessionId, socket.id);
+        socket.to(sessionId).emit('participant-left', {
+          participantId: socket.data.participantId
+        });
+      }
+
+      logger.info({ event: 'socket_disconnected', socketId: socket.id });
+    });
+  });
+
+  return io;
+};
+
+const handleSocketEvent = (socket, handler) => async (payload, ack) => {
+  try {
+    await handler(payload || {}, ack);
+  } catch (error) {
+    const response = {
+      code: error.code || 'SOCKET_ERROR',
+      message: error.message || 'Socket event failed.'
+    };
+    socket.emit('error', response);
+    ack?.({ ok: false, error: response });
+  }
+};
+
+const authorizeSession = (socket, sessionId) => {
+  if (!sessionId) {
+    throw new AppError('SESSION_REQUIRED', 'Session id is required.', 400);
+  }
+
+  if (socket.user.type === 'customer' && socket.user.sessionId !== sessionId) {
+    throw new AppError('FORBIDDEN', 'You are not allowed to access this session.', 403);
+  }
+};
+
+const authorizeAgent = (socket) => {
+  if (socket.user.type !== 'agent') {
+    throw new AppError('FORBIDDEN', 'Only agents can perform this action.', 403);
+  }
+};
