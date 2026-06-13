@@ -115,7 +115,11 @@ export const initSocketServer = (httpServer) => {
 
       // Add TURN servers if configured
       if (env.TURN_URLS) {
-        const turnUrls = env.TURN_URLS.split(',').map(u => u.trim()).filter(Boolean);
+        // Fix common typos in user-entered TURN URLs (e.g. "a]" instead of "a.")
+        const turnUrls = env.TURN_URLS
+          .split(',')
+          .map(u => u.trim().replace(/a\]/g, 'a.').replace(/a\.\]/g, 'a.'))
+          .filter(Boolean);
         if (turnUrls.length > 0) {
           iceServers.push({
             urls: turnUrls,
