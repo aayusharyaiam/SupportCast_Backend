@@ -45,6 +45,7 @@ export const initSocketServer = (httpServer) => {
         const existingPeer = mediasoupService.getPeerInfo(sessionId, socket.id);
         if (existingPeer) {
           const existingProducers = mediasoupService.getOtherProducers(sessionId, socket.id);
+          const existingParticipants = mediasoupService.getOtherPeers(sessionId, socket.id);
           ack?.({
             ok: true,
             data: {
@@ -52,6 +53,7 @@ export const initSocketServer = (httpServer) => {
               role: socket.user.role,
               participantId: existingPeer.participantId,
               producers: existingProducers,
+              participants: existingParticipants,
               reconnected: true
             }
           });
@@ -92,6 +94,7 @@ export const initSocketServer = (httpServer) => {
       });
 
       const existingProducers = mediasoupService.getOtherProducers(sessionId, socket.id);
+      const existingParticipants = mediasoupService.getOtherPeers(sessionId, socket.id);
 
       ack?.({
         ok: true,
@@ -99,7 +102,8 @@ export const initSocketServer = (httpServer) => {
           sessionId,
           role: socket.user.role,
           participantId,
-          producers: existingProducers
+          producers: existingProducers,
+          participants: existingParticipants
         }
       });
     }));
@@ -258,6 +262,7 @@ export const initSocketServer = (httpServer) => {
     }));
 
     socket.on('end-session', handleSocketEvent(socket, async ({ sessionId }, ack) => {
+      authorizeAgent(socket);
       authorizeSession(socket, sessionId);
       await sessionService.endSession({ sessionId, endedBy: socket.user.role });
       io.to(sessionId).emit('session-ended', { sessionId, endedBy: socket.user.role });

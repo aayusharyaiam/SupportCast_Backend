@@ -277,9 +277,26 @@ const getOtherProducers = (sessionId, socketId) => {
     return [...peer.producers.values()].map((producer) => ({
       producerId: producer.id,
       participantId: peer.participantId,
+      name: peer.displayName,
+      role: peer.role,
       kind: producer.kind
     }));
   });
+};
+
+const getOtherPeers = (sessionId, socketId) => {
+  const room = rooms.get(sessionId);
+  if (!room) {
+    return [];
+  }
+
+  return [...room.peers.entries()]
+    .filter(([peerSocketId]) => peerSocketId !== socketId)
+    .map(([, peer]) => ({
+      participantId: peer.participantId,
+      name: peer.displayName,
+      role: peer.role
+    }));
 };
 
 export const mediasoupService = {
@@ -300,5 +317,6 @@ export const mediasoupService = {
   getPlainTransport,
   cleanupPeer,
   getOtherProducers,
+  getOtherPeers,
   rooms,
 };
