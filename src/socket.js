@@ -10,6 +10,7 @@ import { logger } from './utils/logger.js';
 
 let ioServer = null;
 const disconnectTimers = new Map();
+const DISCONNECT_GRACE_MS = 10000;
 
 export const initSocketServer = (httpServer) => {
   const io = new Server(httpServer, {
@@ -259,6 +260,13 @@ export const initSocketServer = (httpServer) => {
       ack?.({ ok: true });
     }));
 
+    socket.on('leave-session', handleSocketEvent(socket, async ({ sessionId }, ack) => {
+      authorizeSession(socket, sessionId);
+
+      leaveSocketSession(io, socket, sessionId);
+      ack?.({ ok: true });
+    }));
+
     socket.on('start-recording', handleSocketEvent(socket, async ({ sessionId }, ack) => {
       authorizeAgent(socket);
       authorizeSession(socket, sessionId);
@@ -315,14 +323,15 @@ export const initSocketServer = (httpServer) => {
       const sessionId = socket.data.sessionId;
       const participantId = socket.data.participantId;
 
-      if (sessionId && participantId) {
+      if (socket.data.hasLeftSession) {
+        logger.info({ event: 'socket_disconnected_after_leave', socketId: socket.id });
+      } else if (sessionId && participantId) {
         const timerKey = `${sessionId}:${participantId}`;
         const timer = setTimeout(() => {
-          mediasoupService.cleanupPeer(sessionId, socket.id);
-          io.to(sessionId).emit('participant-left', { participantId });
+          leaveSocketSession(io, socket, sessionId);
           disconnectTimers.delete(timerKey);
           logger.info({ event: 'participant_grace_expired', sessionId, participantId });
-        }, 30000);
+        }, DISCONNECT_GRACE_MS);
 
         disconnectTimers.set(timerKey, timer);
         logger.info({ event: 'socket_disconnected_grace_start', socketId: socket.id, sessionId, participantId });
@@ -336,6 +345,30 @@ export const initSocketServer = (httpServer) => {
 };
 
 export const getSocketServer = () => ioServer;
+
+const leaveSocketSession = (io, socket, sessionId) => {
+  const participantId = socket.data.participantId;
+  if (!sessionId || !participantId || socket.data.hasLeftSession) {
+    return;
+  }
+
+  const timerKey = `${sessionId}:${participantId}`;
+  const existingTimer = disconnectTimers.get(timerKey);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    disconnectTimers.delete(timerKey);
+  }
+
+  const peer = mediasoupService.getPeerInfo(sessionId, socket.id);
+  mediasoupService.cleanupPeer(sessionId, socket.id);
+  socket.leave(sessionId);
+  socket.data.hasLeftSession = true;
+
+  io.to(sessionId).emit('participant-left', {
+    participantId,
+    name: peer?.displayName
+  });
+};
 
 const handleSocketEvent = (socket, handler) => async (payload, ack) => {
   try {
