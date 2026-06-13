@@ -14,59 +14,61 @@ const DEMO_USERS = [
   { email: 'judge@supportcast.com', password: 'Judge@1234', displayName: 'Judge Agent', role: 'agent' },
 ];
 
-async function createOrUpdateAgent(user, authId) {
+async function upsertAgent(user, authId) {
   const { data, error } = await supabase
     .from('agents')
     .upsert(
-      { email: user.email, display_name: user.displayName, role: user.role, supabase_user_id: authId },
+      { email: user.email, display_name: user.displayName, role: user.role, auth_id: authId },
       { onConflict: 'email' }
     )
-    .select()
+    .select('id')
     .single();
 
   if (error) {
     console.error(`  Failed to upsert agent ${user.email}:`, error.message);
     return null;
   }
-  console.log(`  ${user.role === 'admin' ? 'Admin' : 'Agent'} '${user.email}' → agents.id=${data.id}`);
+  console.log(`  '${user.email}' (${user.role}) → agents.id=${data.id}`);
   return data;
 }
 
 async function seedAgents() {
   console.log('\n[1/3] Seeding agents...');
 
-  for (const user of DEMO_USERS) {
-    const { data: existing } = await supabase
-      .from('agents')
-      .select('id, supabase_user_id')
-      .eq('email', user.email)
-      .maybeSingle();
-
-    if (existing?.supabase_user_id) {
-      console.log(`  '${user.email}' already has supabase_user_id=${existing.supabase_user_id} — skipping auth creation`);
-      await createOrUpdateAgent(user, existing.supabase_user_id);
-      continue;
+  const { data: allUsers } = await supabase.auth.admin.listUsers();
+  const existingByEmail = {};
+  if (allUsers?.users) {
+    for (const u of allUsers.users) {
+      existingByEmail[u.email] = u.id;
     }
+  }
 
-    try {
-      const { data: authData, error: authError } = await supabase.auth.admin.createUser({
-        email: user.email,
-        password: user.password,
-        email_confirm: true,
-        user_metadata: { display_name: user.displayName, role: user.role }
-      });
+  for (const user of DEMO_USERS) {
+    let authId = existingByEmail[user.email];
 
-      if (authError) {
-        console.error(`  Auth error for ${user.email}:`, authError.message);
+    if (!authId) {
+      try {
+        const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+          email: user.email,
+          password: user.password,
+          email_confirm: true,
+          user_metadata: { display_name: user.displayName, role: user.role }
+        });
+        if (authError) {
+          console.error(`  Auth error for ${user.email}:`, authError.message);
+          continue;
+        }
+        authId = authData.user.id;
+        console.log(`  Created auth user '${user.email}' → id=${authId}`);
+      } catch (err) {
+        console.error(`  Exception for ${user.email}:`, err.message);
         continue;
       }
-
-      const authId = authData.user.id;
-      console.log(`  Created auth user '${user.email}' → id=${authId}`);
-      await createOrUpdateAgent(user, authId);
-    } catch (err) {
-      console.error(`  Exception for ${user.email}:`, err.message);
+    } else {
+      console.log(`  '${user.email}' already in auth → id=${authId} — skipping create`);
     }
+
+    await upsertAgent(user, authId);
   }
 }
 
@@ -79,7 +81,7 @@ async function seedSessions() {
   console.log('\n[2/3] Seeding demo sessions...');
 
   const agentId = await getAgentId('agent@supportcast.com');
-  if (!agentId) { console.error('  agent@supportcast.com not found'); return; }
+  if (!agentId) { console.error('  agent@supportcast.com not found in agents table'); return; }
 
   const now = Date.now();
   const DAY = 24 * 60 * 60 * 1000;
@@ -110,14 +112,13 @@ async function seedSessions() {
     const createdAt = new Date(now - def.daysAgo * DAY).toISOString();
     const startedAt = new Date(now - def.daysAgo * DAY + def.hoursAgo * 60 * 60 * 1000).toISOString();
     const endedAt = new Date(now - def.daysAgo * DAY + (def.hoursAgo * 60 + def.durationMin) * 60 * 1000).toISOString();
-    const inviteToken = randomUUID();
 
     const { data: session, error: sessErr } = await supabase
       .from('sessions')
       .insert({
         agent_id: agentId,
         status: 'ended',
-        invite_token: inviteToken,
+        invite_token: randomUUID(),
         created_at: createdAt,
         started_at: startedAt,
         ended_at: endedAt,
@@ -132,15 +133,13 @@ async function seedSessions() {
       continue;
     }
 
-    console.log(`  Session ${session.id} (${def.daysAgo} day(s) ago, ${def.durationMin}min)`);
+    console.log(`  Session ${session.id} (${def.daysAgo}d ago, ${def.durationMin}min)`);
 
-    // Participants
     await supabase.from('participants').insert([
       { session_id: session.id, role: 'agent', display_name: 'Demo Agent', joined_at: startedAt, left_at: endedAt },
       { session_id: session.id, role: 'customer', display_name: def.messages[0].name, joined_at: startedAt, left_at: endedAt },
     ]);
 
-    // Chat messages
     const baseTime = new Date(startedAt).getTime();
     const msgSpacing = (def.durationMin * 60 * 1000) / (def.messages.length + 1);
     for (let i = 0; i < def.messages.length; i++) {
@@ -156,7 +155,6 @@ async function seedSessions() {
       });
     }
 
-    // Events
     await supabase.from('session_events').insert([
       { session_id: session.id, event_type: 'session_created', actor_role: 'agent', actor_name: 'Demo Agent', created_at: createdAt },
       { session_id: session.id, event_type: 'participant_joined', actor_role: 'agent', actor_name: 'Demo Agent', created_at: startedAt },
@@ -167,10 +165,7 @@ async function seedSessions() {
 }
 
 async function seedLiveSession() {
-  console.log('\n[3/3] Seeding live session...');
-  const agentId = await getAgentId('agent@supportcast.com');
-  if (!agentId) return;
-
+  console.log('\n[3/3] Checking live session...');
   const { data: existing } = await supabase
     .from('sessions')
     .select('id')
@@ -181,20 +176,19 @@ async function seedLiveSession() {
     console.log('  Live session already exists — skipping');
     return;
   }
-
-  const inviteToken = randomUUID();
-  const now = new Date().toISOString();
+  const agentId = await getAgentId('agent@supportcast.com');
+  if (!agentId) return;
 
   const { data: session } = await supabase
     .from('sessions')
-    .insert({ agent_id: agentId, status: 'waiting', invite_token: inviteToken, created_at: now })
+    .insert({ agent_id: agentId, status: 'waiting', invite_token: randomUUID(), created_at: new Date().toISOString() })
     .select('id')
     .single();
 
   if (session) {
     console.log(`  Live session created: ${session.id}`);
     await supabase.from('session_events').insert({
-      session_id: session.id, event_type: 'session_created', actor_role: 'agent', actor_name: 'Demo Agent', created_at: now
+      session_id: session.id, event_type: 'session_created', actor_role: 'agent', actor_name: 'Demo Agent', created_at: new Date().toISOString()
     });
   }
 }
